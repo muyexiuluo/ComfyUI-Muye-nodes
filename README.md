@@ -1,6 +1,6 @@
 # ComfyUI-Muye-nodes
 
-## 📁 插件节点结构图
+## 📁 插件节点预览
 
 ```
 ComfyUI_Muye/
@@ -68,8 +68,9 @@ ComfyUI_Muye/
 
 ### 🦞 提示词反推及扩写
 
-基于 Qwen3-VL / Qwen2.5-VL / LLaVA 的通用指令节点,支持三种推理模式:
+基于 Qwen3-VL / Qwen2.5-VL / LLaVA 的通用指令节点,支持四种推理模式:
 
+- **文本推理** - 通常用于提示词扩写。
 - **单图推理** - 逐张独立处理图片,每张图单独输出结果。有图时模型看图执行指令,无图时纯文本执行。适用于批量图片反推、提示词扩写、风格转换等。
 - **多图参考** - 将多张图片一起作为交叉参考源,模型自动按输入顺序编号为【图1】、【图2】...,用户可在指令中指定"用图1的背景+图2的姿势"等方式融合多图元素。需 Qwen 系列模型支持。
 - **视频序列帧** - 将输入的帧序列视为连续视频,让模型理解时间维度的动态变化。需 Qwen 系列模型支持(Qwen2.5-VL / Qwen3-VL)。
@@ -109,14 +110,13 @@ ComfyUI_Muye/
 
 ## 推荐模型
 
-### thesby/Qwen3-VL-8B-NSFW-Caption-V4.5 ⭐ 首选推荐
+## thesby/Qwen3-VL-8B-NSFW-Caption-V4.5 ⭐ 首选推荐
 
 **适合人群:** 追求最高描述质量,显存充足(BF16 约需 16GB+),需要处理复杂场景和短视频的用户。
 
 **模型特点:**
-- SFW 与 NSFW 内容全覆盖,无审查过滤
-- 擅长超长文本描述,可生成数百词的详细段落,深入分析图像叙事结构和潜在含义
-- 中英双语支持良好,V4.5 版本已修复英文 prompt 拒绝描述的问题
+- SFW 与 NSFW 内容全覆盖,无审查过滤，质量比2.5高
+- 擅长长文本详细描述,适合复杂场景的深度内容解读
 
 **适合场景:** LoRA 训练高质量 caption、深度图片分析、短视频内容理解、需要长描述的创意写作灵感
 
@@ -131,9 +131,6 @@ ComfyUI_Muye/
 **模型特点:**
 - SFW 与 NSFW 内容全覆盖,无审查过滤
 - 擅长长文本详细描述,适合复杂场景的深度内容解读
-- 兼容性好,transformers >= 4.45 即可使用
-
-**适合场景:** LoRA 训练 caption 生成、日常图片反推、资源有限但需要高质量描述的用户
 
 **下载地址:** https://www.modelscope.cn/models/fireicewolf/Qwen2.5-VL-7B-N-Caption-V3
 
@@ -182,7 +179,7 @@ ComfyUI/models/Caption_checkpoints/模型名/
 | **性别识别** | 基于UniFace AgeGender (~8MB)，自动预测每张脸的性别和年龄 |
 | **多脸索引输出** | 支持 `1 3 5`、`2,4,6`、`0`(全部) 等多序号输入，空格/中英文逗号分隔，如果只想要1张脸 输入对应的序号即可|
 | **智能旋转扶正** | 基于两眼关键点连线计算倾斜角，以每张脸各自中心为旋转点独立旋转，±5°以内不旋转 |
-| **辅助遮罩** | 支持外接 mask（如 SAM/Impact 检测器输出），自动 IoU 配对优化边界框 |
+| **辅助遮罩** | 支持外接 mask（如 SAM/Impact/yolo 检测器输出），自动 IoU 配对优化边界框 |
 | **性别过滤** | 可按男/女筛选，过滤后为空时自动回退到全部结果 |
 
 **参数说明：**
@@ -264,10 +261,13 @@ ComfyUI/models/Caption_checkpoints/模型名/
 
 ![图片描述](./示例图片/尺寸选择.png) ![图片描述](./示例图片/尺寸预设.png)
 
-###  安装:
+###   自动安装
+在comfyui manager中搜索 “muye” ，点击安装即可。
+
+###  手动安装:
 将本仓库克隆到 你的.\ComfyUI\custom_nodes\ 文件夹下
 cd xx\ComfyUI\custom_nodes
 
-[git clone https://github.com/muyexiuluo/ComfyUI_Muye.git] 或者 (https://github.com/muyexiuluo/ComfyUI-Muye-nodes.git)
+[git clone https://github.com/muyexiuluo/ComfyUI_Muye.git] 
 然后安装下 requirements.txt 文件中的依赖就行了
 

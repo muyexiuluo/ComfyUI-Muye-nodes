@@ -9,8 +9,8 @@ transformers>=4.50.3
 accelerate
 safetensors
 
-# 面部选择器节点：人脸检测
-mediapipe
+# 面部选择器节点：人脸检测 + 性别识别（UniFace）
+uniface
 
 # 面部选择器 + 图片批量缩放：图像处理
 opencv-python
@@ -27,6 +27,9 @@ scipy
 # Pillow          # ComfyUI 基础环境已包含
 
 # —— 可选依赖（按需安装）——
+
+# 水印去检测节点：开放词汇零样本检测
+ultralytics>=8.3.0
 
 ## bitsandbytes    # 图像反推节点 INT8/INT4 量化加载需要，不装则无法使用量化模式
 ## torchaudio      # file_reader 节点读取音频文件需要，不常用可不装
