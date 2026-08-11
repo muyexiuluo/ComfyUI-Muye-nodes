@@ -1,3 +1,4 @@
+import time
 import torch
 import random
 import numpy as np
@@ -137,11 +138,10 @@ class 提示词反推及扩写:
         random.seed(seed_val)
         np.random.seed(seed_val)
 
-        # ── 日志 ──
+        # 日志
         有图像 = 图像 is not None
         print(f"[木叶·提示词扩写V2] 模型: {模型.model_name} ({arch_type})")
         print(f"[木叶·提示词扩写V2] 模式: {推理模式} | 有图: {有图像} | 种子: {种子} | 温度: {温度}")
-        print(f"[木叶·提示词扩写V2] 文本输入: {文本[:100]}{'...' if len(文本) > 100 else ''}")
 
         # ── 系统提示 ──
         system_content = (
@@ -155,6 +155,8 @@ class 提示词反推及扩写:
         pil_images = comfy_image_to_pil(图像) if 有图像 else []
 
         results = []
+        total_count = 0
+        start_time = time.time()
 
         # ════════════════════════════════════════════════════
         # 模式0：文本扩写 — 纯文本处理，忽略图像输入
@@ -166,7 +168,7 @@ class 提示词反推及扩写:
                     system_content, 最大生成长度, 温度, TopP采样, 重复惩罚,
                 )
                 results.append(result)
-                print(f"[木叶·提示词扩写V2] 文本扩写完成, 输出长度: {len(result)}")
+                total_count += 1
             except Exception as e:
                 import traceback
                 results.append(f"错误: {str(e)}")
@@ -183,7 +185,7 @@ class 提示词反推及扩写:
                         system_content, 最大生成长度, 温度, TopP采样, 重复惩罚,
                     )
                     results.append(result)
-                    print(f"[木叶·提示词扩写V2] 单图完成, 输出长度: {len(result)}")
+                    total_count += 1
                 except Exception as e:
                     import traceback
                     results.append(f"错误: {str(e)}")
@@ -202,7 +204,7 @@ class 提示词反推及扩写:
                         system_content, 最大生成长度, 温度, TopP采样, 重复惩罚,
                     )
                     results.append(result)
-                    print(f"[木叶·提示词扩写V2] 多图参考完成 ({len(pil_images)}张图), 输出长度: {len(result)}")
+                    total_count += len(pil_images)
                 except Exception as e:
                     import traceback
                     results.append(f"错误: {str(e)}")
@@ -221,11 +223,19 @@ class 提示词反推及扩写:
                         system_content, 最大生成长度, 温度, TopP采样, 重复惩罚,
                     )
                     results.append(result)
-                    print(f"[木叶·提示词扩写V2] 视频序列帧完成 ({len(pil_images)}帧), 输出长度: {len(result)}")
+                    total_count += len(pil_images)
                 except Exception as e:
                     import traceback
                     results.append(f"错误: {str(e)}")
                     print(f"[木叶·提示词扩写V2] 视频失败:\n{traceback.format_exc()}")
+
+        elapsed = time.time() - start_time
+
+        if not results:
+            results.append("错误：未生成任何输出")
+
+        if torch.cuda.is_available():
+            print(f"[木叶·提示词扩写V2] 完成 | 推理: {total_count} 张 | 总耗时: {elapsed:.1f}s | 均速: {elapsed / max(total_count, 1):.2f}s/张")
 
         if not results:
             results.append("错误：未生成任何输出")

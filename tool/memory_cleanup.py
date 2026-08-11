@@ -16,7 +16,18 @@ def _unload_caption_models():
     """从 sys.modules 中找到 CaptionModelWrapper 并卸载"""
     mod_name = "image2prompt.model_loader"
     if mod_name not in sys.modules:
-        print("[木叶·显存释放] 未找到 model_loader 模块")
+        # 尝试找所有可能加载了的 model_loader 模块
+        found = False
+        for key, mod in list(sys.modules.items()):
+            if hasattr(mod, "CaptionModelWrapper"):
+                wrapper_cls = getattr(mod, "CaptionModelWrapper", None)
+                if wrapper_cls is not None and hasattr(wrapper_cls, "_instances"):
+                    freed = wrapper_cls.unload_all()
+                    found = True
+                    print(f"[木叶·显存释放] 通过 {key} 找到并卸载 Caption 模型")
+                    return freed
+        if not found:
+            print("[木叶·显存释放] 未找到 model_loader 模块，尝试直接扫描 GPU 引用...")
         return 0
 
     mod = sys.modules[mod_name]
@@ -54,24 +65,16 @@ class 显存释放:
     def cleanup(self, **kwargs):
         print("[木叶·显存释放] 开始清理显存...")
 
-        # 1. 卸载 ComfyUI 管理的所有模型
+        # 1. 先卸载木叶 Caption 模型（在 ComfyUI unload 之前，因为后面会清缓存）
+        freed = _unload_caption_models()
+
+        # 3. 卸载 ComfyUI 管理的所有模型
         try:
             model_management.unload_all_models()
             model_management.soft_empty_cache(True)
             print("[木叶·显存释放] ComfyUI 模型已卸载")
         except Exception as e:
             print(f"[木叶·显存释放] ComfyUI 模型卸载异常(可忽略): {e}")
-
-        # 2. 先清一轮缓存
-        gc.collect()
-        try:
-            torch.cuda.empty_cache()
-            torch.cuda.ipc_collect()
-        except Exception:
-            pass
-
-        # 3. 卸载木叶 Caption 模型
-        freed = _unload_caption_models()
 
         # 4. Caption 模型的 tensor 引用已断开，再清一轮
         gc.collect()

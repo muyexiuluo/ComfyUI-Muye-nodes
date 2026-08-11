@@ -22,6 +22,7 @@ def load_all_nodes(root_dir):
                 try:
                     spec = importlib.util.spec_from_file_location(module_name, module_path)
                     module = importlib.util.module_from_spec(spec)
+                    sys.modules[module_name] = module
                     spec.loader.exec_module(module)
                     if hasattr(module, "NODE_CLASS_MAPPINGS"):
                         NODE_CLASS_MAPPINGS.update(module.NODE_CLASS_MAPPINGS)
