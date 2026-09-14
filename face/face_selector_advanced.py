@@ -26,7 +26,9 @@ class FaceAnalyzerUni:
             print(f"[面部选择器] ❌ UniFace 初始化失败: {e}")
 
     def detect_faces(self, image, min_size=50):
-        """UniFace bbox 格式是 [x1,y1,x2,y2]，转换为 [x,y,w,h]"""
+        """UniFace bbox 格式是 [x1,y1,x2,y2]，转换为 [x,y,w,h]
+        只做检测；性别识别由 predict_genders 在置信度过滤之后执行，避免对低置信度脸浪费算力
+        """
         if not self.initialized or self.detector is None:
             return []
         faces = []
@@ -39,25 +41,42 @@ class FaceAnalyzerUni:
                     bw = x2 - x1
                     bh = y2 - y1
                     if bw >= min_size and bh >= min_size:
-                        gender = 'unknown'
-                        try:
-                            result = self.age_gender.predict(image, d)
-                            if result.gender == 1:
-                                gender = 'male'
-                            elif result.gender == 0:
-                                gender = 'female'
-                        except Exception:
-                            pass
                         landmarks = np.array(d.landmarks) if d.landmarks is not None else None
                         faces.append({
                             'box': [x1, y1, bw, bh],
                             'score': float(d.confidence),
-                            'gender': gender,
+                            'gender': 'unknown',
                             'landmarks': landmarks
                         })
-            print(f"[面部选择器] 检测到的脸性别: {[f['gender'] for f in faces]}")
         except Exception as e:
             print(f"[面部选择器] 检测异常: {e}")
+        return faces
+
+    def predict_genders(self, image, faces):
+        """性别识别（应在置信度/尺寸过滤之后调用）
+        image: 原图 BGR
+        """
+        if not self.initialized or self.age_gender is None or not faces:
+            return faces
+        class _Det:
+            pass
+        for f in faces:
+            if f.get('gender', 'unknown') != 'unknown':
+                continue
+            try:
+                x, y, w, h = [int(v) for v in f['box']]
+                d = _Det()
+                d.bbox = np.array([x, y, x + w, y + h])
+                d.confidence = f.get('score', 1.0)
+                d.landmarks = f.get('landmarks')
+                result = self.age_gender.predict(image, d)
+                if result.gender == 1:
+                    f['gender'] = 'male'
+                elif result.gender == 0:
+                    f['gender'] = 'female'
+            except Exception:
+                f['gender'] = 'unknown'
+        print(f"[面部选择器] 检测到的脸性别: {[f['gender'] for f in faces]}")
         return faces
 
     def get_face_angle(self, image, face):
@@ -163,29 +182,31 @@ class 面部选择器:
         if img.dtype != np.uint8:
             img = img.astype(np.uint8)
 
-        # 2. UniFace检测+置信度过滤+最小尺寸过滤
+        # 2. UniFace检测+置信度过滤+最小尺寸过滤（性别识别移到过滤之后，省算力）
         img_bgr = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
         faces_model = self.analyzer.detect_faces(img_bgr, min_size=最小尺寸)
         faces_model = [f for f in faces_model if f.get('score', 1.0) >= 置信度阈值]
         faces_model = [f for f in faces_model if f['box'][2] >= 最小尺寸 and f['box'][3] >= 最小尺寸]
         print(f"[面部选择器] UniFace检测到人脸数量: {len(faces_model)}")
+        self.analyzer.predict_genders(img_bgr, faces_model)
 
         # 3. 遮罩box提取
         faces_mask = []
+        crop_regions = []
         if 辅助遮罩 is not None:
             mask = 辅助遮罩
             if isinstance(mask, torch.Tensor):
                 mask_np = mask.detach().cpu().numpy()
             else:
                 mask_np = np.array(mask)
-            while mask_np.ndim > 2:
-                mask_np = np.squeeze(mask_np, axis=0)
+            mask_np = np.asarray(mask_np)
+            mask_np = np.squeeze(mask_np)
+            if mask_np.ndim != 2:
+                raise ValueError(f"辅助遮罩格式错误，shape={mask_np.shape}，请提供单通道mask")
             if mask_np.max() <= 1.0:
                 mask_np = (mask_np * 255).round().astype(np.uint8)
             else:
                 mask_np = mask_np.astype(np.uint8)
-            if mask_np.ndim != 2:
-                raise ValueError(f"辅助遮罩格式错误，shape={mask_np.shape}，请提供单通道mask")
             face_centers = []
             for f in faces_model:
                 x, y, w, h = f['box']
@@ -196,12 +217,12 @@ class 面部选择器:
                 from scipy import ndimage as ndi
             except ImportError:
                 watershed = None
-            for cnt in contours:
+            for cnt_i, cnt in enumerate(contours):
                 x, y, w, h = cv2.boundingRect(cnt)
                 region_centers = [pt for pt in face_centers if x <= pt[0] <= x+w and y <= pt[1] <= y+h]
                 if len(region_centers) <= 1 or watershed is None:
                     if w >= 最小尺寸 and h >= 最小尺寸 and w*h >= 100:
-                        faces_mask.append({'box': [x, y, w, h]})
+                        faces_mask.append({'box': [x, y, w, h], 'region': cnt_i})
                 else:
                     mask_region = np.zeros_like(mask_np)
                     cv2.drawContours(mask_region, [cnt], -1, 255, -1)
@@ -223,7 +244,7 @@ class 面部选择器:
                         for scnt in sub_contours:
                             xx, yy, ww, hh = cv2.boundingRect(scnt)
                             if ww >= 5 and hh >= 5 and ww*hh >= 10:
-                                faces_mask.append({'box': [xx, yy, ww, hh]})
+                                faces_mask.append({'box': [xx, yy, ww, hh], 'region': cnt_i})
                     for i, pt in enumerate(region_centers):
                         if (i+1) not in found_label:
                             cx, cy = int(pt[0]), int(pt[1])
@@ -232,7 +253,22 @@ class 面部选择器:
                             yy = max(cy - r, 0)
                             ww = min(r*2, mask_np.shape[1]-xx)
                             hh = min(r*2, mask_np.shape[0]-yy)
-                            faces_mask.append({'box': [xx, yy, ww, hh]})
+                            faces_mask.append({'box': [xx, yy, ww, hh], 'region': cnt_i})
+            # 3a. 裁剪区域 = contour包围盒 ∪ 其中包含的模型脸box
+            #     模型漏检的脸（分数过低被滤掉）对应区域里没有脸 → 区域仅含contour，按用户给的遮罩原样裁剪输出
+            for cnt_i, cnt in enumerate(contours):
+                x, y, w, h = cv2.boundingRect(cnt)
+                rx1, ry1, rx2, ry2 = x, y, x + w, y + h
+                for m in faces_mask:
+                    if m.get('region') != cnt_i:
+                        continue
+                    bx, by, bw, bh = m['box']
+                    rx1 = min(rx1, bx)
+                    ry1 = min(ry1, by)
+                    rx2 = max(rx2, bx + bw)
+                    ry2 = max(ry2, by + bh)
+                crop_regions.append([rx1, ry1, rx2 - rx1, ry2 - ry1])
+            print(f"[面部选择器] 遮罩裁剪区域数: {len(crop_regions)}")
             print(f"[面部选择器] 遮罩检测到人脸数量: {len(faces_mask)}")
 
         # 4. IoU配对
@@ -251,24 +287,35 @@ class 面部选择器:
             if best_iou > 0.5 and best_idx >= 0:
                 box = faces_mask[best_idx]['box']
                 used_mask_idx.add(best_idx)
+                from_mask = True
             else:
                 box = f['box']
-            faces_final.append({**f, 'box': box})
+                from_mask = False
+            faces_final.append({**f, 'box': box, 'crop_region': None, 'from_mask': from_mask})
         for j, m in enumerate(faces_mask):
             if j not in used_mask_idx:
-                faces_final.append({'box': m['box'], 'score': 1.0, 'gender': 'unknown', 'landmarks': None})
+                region = m.get('region')
+                crop_region = crop_regions[region] if (region is not None and region < len(crop_regions)) else m['box']
+                faces_final.append({
+                    'box': m['box'], 'score': 1.0, 'gender': 'unknown', 'landmarks': None,
+                    'crop_region': crop_region, 'from_mask': True
+                })
 
-        # 5. 性别识别已在 detect_faces 时完成
+        # 5. 性别识别已在 predict_genders（置信度过滤后）完成
         faces_before_gender = list(faces_final)
 
-        # 6. 性别过滤
+        # 6. 性别过滤（遮罩来源的脸豁免过滤：辅助遮罩是用户指定的脸集合，模型漏检的脸没有性别信息）
         if 区分男女 == "男":
-            faces_final = [f for f in faces_final if f.get('gender', 'unknown') == 'male']
+            faces_final = [f for f in faces_final if f.get('from_mask') or f.get('gender', 'unknown') == 'male']
         elif 区分男女 == "女":
-            faces_final = [f for f in faces_final if f.get('gender', 'unknown') == 'female']
+            faces_final = [f for f in faces_final if f.get('from_mask') or f.get('gender', 'unknown') == 'female']
         if (区分男女 in ("男", "女")) and (not faces_final):
             faces_final = faces_before_gender
             print(f"[面部选择器] 按性别过滤后无匹配，已回退到不区分性别的检测结果，共{len(faces_final)}个候选")
+        elif (区分男女 in ("男", "女")) and (len(faces_final) < len(faces_before_gender)):
+            kept_mask = sum(1 for f in faces_final if f.get('from_mask') and f.get('gender', 'unknown') == 'unknown')
+            if kept_mask:
+                print(f"[面部选择器] 提示: {kept_mask}张遮罩脸无模型性别信息，按遮罩保留未被过滤")
 
         # 7. 排序
         if 人物排序 == "像素占比":
@@ -310,10 +357,37 @@ class 面部选择器:
             ex, ey = min(cx + size//2, img_shape[1]), min(cy + size//2, img_shape[0])
             return [nx, ny, ex-nx, ey-ny]
 
+        def mask_full(box=None):
+            """输出遮罩统一为 ComfyUI MASK 规范：float32、0-1、全图尺寸（与 BBox 检测器输出同构，可直连预览）
+            返回 2D [H,W] tensor；调用方按需 unsqueeze 成 [1,H,W]（单张）或 stack 成 [N,H,W]（多张）
+            box: 原图坐标 [x,y,w,h]，在裁剪框位置画白；None=全白（无脸兜底）
+            """
+            H, W = orig_img.shape[:2]
+            m = np.zeros((H, W), dtype=np.float32)
+            if box is None:
+                m[:] = 1.0  # 无脸兜底：全白（与原设计一致）
+            else:
+                bx, by, bw, bh = box
+                x1, y1 = max(int(bx), 0), max(int(by), 0)
+                x2, y2 = min(int(bx) + int(bw), W), min(int(by) + int(bh), H)
+                if x2 > x1 and y2 > y1:
+                    m[y1:y2, x1:x2] = 1.0
+            return torch.from_numpy(m.copy()).contiguous()
+
+        def make_crop(face):
+            """非旋转裁剪：以裁剪区域（有辅助遮罩时为遮罩区域）为中心扩展裁剪，白满矩形遮罩"""
+            box = face.get('crop_region') or face['box']
+            x, y, w, h = expand_box(box, 裁剪系数, orig_img.shape)
+            crop_img = orig_img[y:y+h, x:x+w].copy()
+            mask = np.zeros(orig_img.shape[:2], dtype=np.uint8)
+            cv2.rectangle(mask, (x, y), (x+w, y+h), 255, -1)
+            mask_crop = mask[y:y+h, x:x+w].copy()
+            center = (x + w/2, y + h/2)
+            crop_data = {'box': [x, y, w, h], 'angle': 0, 'center': center, 'rotated': False}
+            return crop_img, mask_crop, crop_data
+
         if not faces_final:
-            mask = np.ones(orig_img.shape[:2], dtype=np.uint8) * 255
-            mask_crop = mask.copy()
-            return (np2torch(orig_img, batch=True), {"box": None, "angle": 0}, mask_crop)
+            return (np2torch(orig_img, batch=True), {"box": None, "angle": 0}, mask_full(None).unsqueeze(0))
 
         # 10. 旋转逻辑：以人脸box中心为旋转中心
         def rotate_box_from_full(img_full, face_orig_box, angle):
@@ -347,10 +421,8 @@ class 面部选择器:
         # 判定逻辑：0 = 输出全部
         if 0 in idx_list:
             if not faces_final:
-                mask = np.ones(orig_img.shape[:2], dtype=np.uint8) * 255
-                mask_crop = mask.copy()
-                return (np2torch(orig_img, batch=True), {"box": None, "angle": 0}, mask_crop)
-            crop_imgs, crop_datas, mask_crops = [], [], []
+                return (np2torch(orig_img, batch=True), {"box": None, "angle": 0}, mask_full(None).unsqueeze(0))
+            crop_imgs, crop_datas = [], []
             rotated_info = []
             for idx_num, face in enumerate(faces_final):
                 if 是否旋转面部:
@@ -362,43 +434,29 @@ class 面部选择器:
                     if angle != 0:
                         rotated_info.append(f"#{idx_num+1} {angle:+.1f}°")
                 else:
-                    x, y, w, h = expand_box(face['box'], 裁剪系数, orig_img.shape)
-                    crop_img = orig_img[y:y+h, x:x+w].copy()
-                    mask = np.zeros(orig_img.shape[:2], dtype=np.uint8)
-                    cv2.rectangle(mask, (x, y), (x+w, y+h), 255, -1)
-                    mask_crop = mask[y:y+h, x:x+w].copy()
-                    center = (x + w/2, y + h/2)
-                    crop_data = {'box': [x, y, w, h], 'angle': 0, 'center': center, 'rotated': False}
-                if crop_img.ndim == 2:
-                    crop_img = np.stack([crop_img]*3, axis=-1)
-                elif crop_img.ndim == 3 and crop_img.shape[2] == 1:
-                    crop_img = np.repeat(crop_img, 3, axis=2)
-                elif crop_img.ndim == 3 and crop_img.shape[2] > 3:
-                    crop_img = crop_img[:, :, :3]
+                    crop_img, mask_crop, crop_data = make_crop(face)
                 crop_imgs.append(np2torch(crop_img, batch=False))
                 crop_datas.append(crop_data)
-                mask_crops.append(mask_crop)
             # 输出日志
             output_info = f"[面部选择器] 输出 {total_faces}/{total_faces} {sort_label} 全部"
             if rotated_info:
                 output_info += f" | 旋转: {', '.join(rotated_info)}"
             print(output_info)
-            return (tuple(crop_imgs), tuple(crop_datas), tuple(mask_crops))
+            # IMAGE: list 批量（各脸 crop 尺寸可不同，ComfyUI 原生格式）
+            # 遮罩: 全图坐标 [N,H,W] float32 0-1（MASK 规范，与 BBox 检测器同构，可直连预览）
+            mask_out = torch.stack([mask_full(d['box']) for d in crop_datas], dim=0)
+            return (tuple(crop_imgs), crop_datas, mask_out)
 
         # 多序号输出
         valid_idxs = [idx for idx in idx_list if 1 <= idx <= len(faces_final)]
         if idx_list and (not valid_idxs):
-            valid_idxs = list(range(1, len(faces_final) + 1))
+            print(f"[面部选择器] [警告] 输出索引{idx_list}全部越界（共检测到{len(faces_final)}张脸），回退输出整图")
+        elif len(valid_idxs) < len(idx_list):
+            invalid = sorted(set(idx_list) - set(valid_idxs))
+            print(f"[面部选择器] [警告] 输出索引含越界序号{invalid}，仅输出有效索引{valid_idxs}")
         if len(valid_idxs) == 1:
             idx = valid_idxs[0] - 1
             face = faces_final[idx]
-            x, y, w, h = expand_box(face['box'], 裁剪系数, orig_img.shape)
-            crop_img = orig_img[y:y+h, x:x+w].copy()
-            mask = np.zeros(orig_img.shape[:2], dtype=np.uint8)
-            cv2.rectangle(mask, (x, y), (x+w, y+h), 255, -1)
-            mask_crop = mask[y:y+h, x:x+w].copy()
-            center = (x + w/2, y + h/2)
-            crop_data = {'box': [x, y, w, h], 'angle': 0, 'center': center, 'rotated': False}
             angle_log = ""
             if 是否旋转面部:
                 try:
@@ -408,16 +466,12 @@ class 面部选择器:
                 crop_img, mask_crop, crop_data = rotate_box_from_full(orig_img, face['box'], angle)
                 if angle != 0:
                     angle_log = f" | 旋转 #{valid_idxs[0]} {angle:+.1f}°"
-            if crop_img.ndim == 2:
-                crop_img = np.stack([crop_img]*3, axis=-1)
-            elif crop_img.ndim == 3 and crop_img.shape[2] == 1:
-                crop_img = np.repeat(crop_img, 3, axis=2)
-            elif crop_img.ndim == 3 and crop_img.shape[2] > 3:
-                crop_img = crop_img[:, :, :3]
+            else:
+                crop_img, mask_crop, crop_data = make_crop(face)
             print(f"[面部选择器] 输出 {len(valid_idxs)}/{total_faces} {sort_label} {valid_idxs}{angle_log}")
-            return (np2torch(crop_img, batch=True), crop_data, mask_crop)
+            return (np2torch(crop_img, batch=True), crop_data, mask_full(crop_data['box']).unsqueeze(0))
         elif len(valid_idxs) > 1:
-            crop_imgs, crop_datas, mask_crops = [], [], []
+            crop_imgs, crop_datas = [], []
             rotated_info = []
             for idx in valid_idxs:
                 i = idx - 1
@@ -431,31 +485,19 @@ class 面部选择器:
                     if angle != 0:
                         rotated_info.append(f"#{idx} {angle:+.1f}°")
                 else:
-                    x, y, w, h = expand_box(face['box'], 裁剪系数, orig_img.shape)
-                    crop_img = orig_img[y:y+h, x:x+w].copy()
-                    mask = np.zeros(orig_img.shape[:2], dtype=np.uint8)
-                    cv2.rectangle(mask, (x, y), (x+w, y+h), 255, -1)
-                    mask_crop = mask[y:y+h, x:x+w].copy()
-                    center = (x + w/2, y + h/2)
-                    crop_data = {'box': [x, y, w, h], 'angle': 0, 'center': center, 'rotated': False}
-                if crop_img.ndim == 2:
-                    crop_img = np.stack([crop_img]*3, axis=-1)
-                elif crop_img.ndim == 3 and crop_img.shape[2] == 1:
-                    crop_img = np.repeat(crop_img, 3, axis=2)
-                elif crop_img.ndim == 3 and crop_img.shape[2] > 3:
-                    crop_img = crop_img[:, :, :3]
+                    crop_img, mask_crop, crop_data = make_crop(face)
                 crop_imgs.append(np2torch(crop_img, batch=False))
                 crop_datas.append(crop_data)
-                mask_crops.append(mask_crop)
             output_info = f"[面部选择器] 输出 {len(valid_idxs)}/{total_faces} {sort_label} {valid_idxs}"
             if rotated_info:
                 output_info += f" | 旋转: {', '.join(rotated_info)}"
             print(output_info)
-            return (tuple(crop_imgs), tuple(crop_datas), tuple(mask_crops))
+            # IMAGE: list 批量（各脸 crop 尺寸可不同，ComfyUI 原生格式）
+            # 遮罩: 全图坐标 [N,H,W] float32 0-1（MASK 规范，与 BBox 检测器同构，可直连预览）
+            mask_out = torch.stack([mask_full(d['box']) for d in crop_datas], dim=0)
+            return (tuple(crop_imgs), crop_datas, mask_out)
         else:
-            mask = np.ones(orig_img.shape[:2], dtype=np.uint8) * 255
-            mask_crop = mask.copy()
-            return (np2torch(orig_img, batch=True), {"box": None, "angle": 0}, mask_crop)
+            return (np2torch(orig_img, batch=True), {"box": None, "angle": 0}, mask_full(None).unsqueeze(0))
 
 # 节点注册导出（名称改为"面部选择器"，原高级节点的class名也改）
 NODE_CLASS_MAPPINGS = {
