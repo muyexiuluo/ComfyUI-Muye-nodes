@@ -14,7 +14,7 @@ class CaptionModelWrapper:
     _instances = []
 
     def __init__(self, model, processor, arch_type, model_path, model_name,
-                 quantization="bf16", attention="eager"):
+                 quantization="bf16", attention="eager", gpu_choice="显卡1"):
         self.model = model
         self.processor = processor
         self.arch_type = arch_type
@@ -22,6 +22,7 @@ class CaptionModelWrapper:
         self.model_name = model_name
         self.quantization = quantization
         self.attention = attention
+        self.gpu_choice = gpu_choice
         self._is_loaded = True
         CaptionModelWrapper._instances.append(self)
 
@@ -37,6 +38,7 @@ class CaptionModelWrapper:
             return False
         model, processor, arch_type = load_model_with_options(
             self.model_path, self.quantization, self.attention,
+            self.gpu_choice,
         )
         if model is None:
             print(f"[木叶·图像反推] 重新加载失败: {self.model_name}")
@@ -154,9 +156,42 @@ def _get_quant_config(quant_mode):
 
 
 # ────────────────────────────────────────────────────────────
-def load_model_with_options(model_dir, quantization_mode="bf16", attention="eager"):
+GPU_OPTIONS = ["自动", "显卡1", "显卡2"]
+
+
+def resolve_gpu_device(gpu_choice="显卡1"):
+    """把节点上的显卡选项转成 from_pretrained 的 device_map 参数。
+
+      自动  -> "auto"（accelerate 跨卡自动分配，放不下会 offload）
+      显卡N -> N-1（整模型放到该卡；显卡1=cuda:0，显卡2=cuda:1）
+    返回 (device_map 参数, 实际显卡索引 或 None)。
+    """
+    if gpu_choice == "自动":
+        return "auto", None
+    if not torch.cuda.is_available():
+        print(f"[木叶·图像反推] 警告: CUDA 不可用，{gpu_choice} 回退为 自动")
+        return "auto", None
+    n = torch.cuda.device_count()
+    try:
+        idx = int(str(gpu_choice).replace("显卡", "")) - 1
+    except ValueError:
+        idx = 0
+    if idx > n - 1:
+        print(f"[木叶·图像反推] 警告: {gpu_choice} 不存在（共 {n} 块显卡），回退到 显卡{n}")
+        idx = n - 1
+    return idx, idx
+
+
+# ────────────────────────────────────────────────────────────
+def load_model_with_options(model_dir, quantization_mode="bf16", attention="eager",
+                            gpu_choice="显卡1"):
+    device_map_arg, gpu_idx = resolve_gpu_device(gpu_choice)
+    if gpu_idx is not None:
+        gpu_desc = f"{gpu_choice} (cuda:{gpu_idx} {torch.cuda.get_device_name(gpu_idx)})"
+    else:
+        gpu_desc = "自动 (auto，accelerate 跨卡分配)"
     print(f"[木叶·图像反推] 正在加载模型: {model_dir}")
-    print(f"[木叶·图像反推] 量化: {quantization_mode} | 加速: {attention}")
+    print(f"[木叶·图像反推] 量化: {quantization_mode} | 加速: {attention} | 显卡: {gpu_desc}")
 
     arch_type = detect_model_arch(model_dir)
     print(f"[木叶·图像反推] 模型架构: {arch_type}")
@@ -173,7 +208,7 @@ def load_model_with_options(model_dir, quantization_mode="bf16", attention="eage
         print(f"[木叶·图像反推] 使用 BitsAndBytes {quantization_mode.upper()} 量化加载")
 
     load_kwargs = {
-        "device_map": "auto",
+        "device_map": device_map_arg,
         "dtype": dtype,
         "trust_remote_code": True,
     }
@@ -196,8 +231,22 @@ def load_model_with_options(model_dir, quantization_mode="bf16", attention="eage
             model = _load_model_by_arch(model_dir, arch_type, load_kwargs.copy())
             model.eval()
         except Exception as e2:
-            print(f"[木叶·图像反推] 模型加载失败: {e2}")
-            return None, None, arch_type
+            if gpu_idx is not None:
+                print(f"[木叶·图像反推] {gpu_choice} 加载失败（{e2}），回退到 自动 跨卡分配重试")
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                load_kwargs["device_map"] = "auto"
+                gpu_idx = None
+                try:
+                    model = _load_model_by_arch(model_dir, arch_type, load_kwargs.copy())
+                    model.eval()
+                except Exception as e3:
+                    print(f"[木叶·图像反推] 模型加载失败: {e3}")
+                    return None, None, arch_type
+            else:
+                print(f"[木叶·图像反推] 模型加载失败: {e2}")
+                return None, None, arch_type
 
     try:
         processor = AutoProcessor.from_pretrained(model_dir, trust_remote_code=True)
@@ -216,8 +265,14 @@ def load_model_with_options(model_dir, quantization_mode="bf16", attention="eage
             pass
 
     if torch.cuda.is_available():
-        used = torch.cuda.memory_allocated(0) / 1024**3
-        print(f"[木叶·图像反推] 模型加载完成 | 显存占用: {used:.1f}GB")
+        if gpu_idx is not None:
+            used = torch.cuda.memory_allocated(gpu_idx) / 1024**3
+            print(f"[木叶·图像反推] 模型加载完成 | cuda:{gpu_idx} 显存占用: {used:.1f}GB")
+        else:
+            for i in range(torch.cuda.device_count()):
+                u = torch.cuda.memory_allocated(i) / 1024**3
+                if u > 0:
+                    print(f"[木叶·图像反推] 模型加载完成 | cuda:{i} 显存占用: {u:.1f}GB")
 
     return model, processor, arch_type
 
@@ -277,6 +332,10 @@ class 反推模型加载:
                     ["BF16", "FP16", "INT8", "INT4"],
                     {"default": "BF16", "tooltip": "模型量化方式"},
                 ),
+                "显卡选择": (
+                    GPU_OPTIONS,
+                    {"default": "显卡1", "tooltip": "显卡1=cuda:0，显卡2=cuda:1，自动=accelerate 跨卡分配。指定显卡显存不足会自动回退为自动分配"},
+                ),
                 "attention": (
                     ["eager", "sdpa", "flash_attention_2"],
                     {"default": "eager", "tooltip": "注意力加速方式"},
@@ -289,13 +348,14 @@ class 反推模型加载:
     FUNCTION = "load_model"
     CATEGORY = "Muye/图像反推"
 
-    def load_model(self, 模型选择, 量化方式="BF16", attention="eager"):
+    def load_model(self, 模型选择, 量化方式="BF16", attention="eager", 显卡选择="显卡1"):
         model_dirs = get_available_models()
         model_path = model_dirs.get(模型选择)
 
         if not model_path or not os.path.isdir(model_path):
             print(f"[木叶·图像反推] 警告: 找不到模型 '{模型选择}'")
-            return (CaptionModelWrapper(None, None, "unknown", "", 模型选择),)
+            return (CaptionModelWrapper(None, None, "unknown", "", 模型选择,
+                                        gpu_choice=显卡选择),)
 
         quant_mode_map = {
             "BF16": "bf16", "FP16": "float16",
@@ -307,15 +367,18 @@ class 反推模型加载:
             model_path,
             quant_str,
             attention,
+            显卡选择,
         )
 
         if model is None:
-            return (CaptionModelWrapper(None, None, "unknown", "", 模型选择),)
+            return (CaptionModelWrapper(None, None, "unknown", "", 模型选择,
+                                        gpu_choice=显卡选择),)
 
         wrapper = CaptionModelWrapper(
             model=model, processor=processor, arch_type=arch_type,
             model_path=model_path, model_name=模型选择,
             quantization=quant_str, attention=attention,
+            gpu_choice=显卡选择,
         )
         print(f"[木叶·图像反推] 模型已加载: {wrapper}")
         return (wrapper,)
