@@ -1,7 +1,7 @@
-[project]
+﻿[project]
 name = "comfyui-muye-nodes"
 description = "Image captioning, prompt engineering, face processing and utility nodes for ComfyUI."
-version = "1.0.12"
+version = "1.0.13"
 license = { file = "LICENSE" }
 
 dependencies = []

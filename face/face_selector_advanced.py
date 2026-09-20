@@ -272,6 +272,8 @@ class 面部选择器:
             print(f"[面部选择器] 遮罩检测到人脸数量: {len(faces_mask)}")
 
         # 4. IoU配对
+        # 配对规则：每张模型脸找 IoU 最高的遮罩脸（>0.5 才算匹配）；未匹配的模型脸用自身box
+        # 未匹配的遮罩脸（模型漏检）保留，进入第 4b 步补识别性别
         used_mask_idx = set()
         faces_final = []
         for i, f in enumerate(faces_model):
@@ -292,30 +294,83 @@ class 面部选择器:
                 box = f['box']
                 from_mask = False
             faces_final.append({**f, 'box': box, 'crop_region': None, 'from_mask': from_mask})
+
+        # 4b. 对模型漏检的遮罩脸补识别性别：
+        #     思路：遮罩轮廓裁出区域 → 在区域内对原图重跑 UniFace 检测 →
+        #     取 IoU 最高的检测结果作为该遮罩脸的检测来源（gender + landmarks）→
+        #     这样漏检的脸也能参与性别过滤，而不是被遮罩身份豁免
+        unmatched_mask = []
         for j, m in enumerate(faces_mask):
             if j not in used_mask_idx:
+                unmatched_mask.append((j, m))
+        if unmatched_mask:
+            # 对每张漏检的遮罩脸：把遮罩脸所在区域从原图裁出来（扩边 30% 给模型检测留余量），
+            # 在该局部图上跑检测，命中则用检测结果的 gender/landmarks；box 仍保留遮罩原 box（用户指定的定位）
+            for j, m in unmatched_mask:
                 region = m.get('region')
                 crop_region = crop_regions[region] if (region is not None and region < len(crop_regions)) else m['box']
+                mx, my, mw, mh = m['box']
+                ex = int(max(mw, mh) * 0.5)
+                rx1 = max(mx - ex, 0)
+                ry1 = max(my - ex, 0)
+                rx2 = min(mx + mw + ex, orig_img.shape[1])
+                ry2 = min(my + mh + ex, orig_img.shape[0])
+                if rx2 > rx1 and ry2 > ry1:
+                    roi_bgr = img_bgr[ry1:ry2, rx1:rx2]
+                    det = self.analyzer.detect_faces(roi_bgr, min_size=10)
+                    best = None
+                    best_iou = 0
+                    for d in det:
+                        d_box_local = [d['box'][0] + rx1, d['box'][1] + ry1, d['box'][2], d['box'][3]]
+                        iou = compute_iou(m['box'], d_box_local)
+                        if iou > best_iou:
+                            best_iou = iou
+                            best = d
+                    if best is not None and best_iou > 0.2:
+                        # 命中：对 ROI 补跑性别识别，landmarks 换算回全图坐标，box 仍用遮罩原 box
+                        self.analyzer.predict_genders(roi_bgr, [best])
+                        lm = best.get('landmarks')
+                        lm_global = None
+                        if lm is not None:
+                            lm_global = np.array(lm, dtype=np.float32)
+                            lm_global[:, 0] += rx1
+                            lm_global[:, 1] += ry1
+                        faces_final.append({
+                            'box': m['box'], 'score': 1.0,
+                            'gender': best.get('gender', 'unknown'),
+                            'landmarks': lm_global,
+                            'crop_region': crop_region, 'from_mask': True, 'recovered': True
+                        })
+                        print(f"[面部选择器] 遮罩漏检脸补识别成功: {m['box']} gender={best.get('gender', 'unknown')}")
+                        continue
+                # 未命中：仍保留遮罩脸（用户明确框的），性别 unknown，豁免过滤
                 faces_final.append({
                     'box': m['box'], 'score': 1.0, 'gender': 'unknown', 'landmarks': None,
-                    'crop_region': crop_region, 'from_mask': True
+                    'crop_region': crop_region, 'from_mask': True, 'recovered': False
                 })
+                print(f"[面部选择器] 遮罩漏检脸补识别失败，保留为 unknown（豁免过滤）: {m['box']}")
 
-        # 5. 性别识别已在 predict_genders（置信度过滤后）完成
+        # 5. 性别信息已全部就绪（模型脸在 predict_genders 阶段、漏检遮罩脸在 4b 阶段）
         faces_before_gender = list(faces_final)
 
-        # 6. 性别过滤（遮罩来源的脸豁免过滤：辅助遮罩是用户指定的脸集合，模型漏检的脸没有性别信息）
+        # 6. 性别过滤（只有"遮罩来源且补识别失败（gender=unknown）"的脸豁免，其余一律按性别过滤）
         if 区分男女 == "男":
-            faces_final = [f for f in faces_final if f.get('from_mask') or f.get('gender', 'unknown') == 'male']
+            faces_final = [f for f in faces_before_gender if (
+                (f.get('gender', 'unknown') != 'unknown' and f.get('gender', 'unknown') == 'male')
+                or (f.get('gender', 'unknown') == 'unknown' and f.get('from_mask'))
+            )]
         elif 区分男女 == "女":
-            faces_final = [f for f in faces_final if f.get('from_mask') or f.get('gender', 'unknown') == 'female']
+            faces_final = [f for f in faces_before_gender if (
+                (f.get('gender', 'unknown') != 'unknown' and f.get('gender', 'unknown') == 'female')
+                or (f.get('gender', 'unknown') == 'unknown' and f.get('from_mask'))
+            )]
         if (区分男女 in ("男", "女")) and (not faces_final):
             faces_final = faces_before_gender
             print(f"[面部选择器] 按性别过滤后无匹配，已回退到不区分性别的检测结果，共{len(faces_final)}个候选")
         elif (区分男女 in ("男", "女")) and (len(faces_final) < len(faces_before_gender)):
             kept_mask = sum(1 for f in faces_final if f.get('from_mask') and f.get('gender', 'unknown') == 'unknown')
             if kept_mask:
-                print(f"[面部选择器] 提示: {kept_mask}张遮罩脸无模型性别信息，按遮罩保留未被过滤")
+                print(f"[面部选择器] 提示: {kept_mask}张遮罩脸补识别失败无性别信息，按遮罩保留未被过滤")
 
         # 7. 排序
         if 人物排序 == "像素占比":
