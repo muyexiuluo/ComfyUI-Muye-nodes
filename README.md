@@ -19,6 +19,7 @@ ComfyUI_Muye/
 │   ├── add_image_watermark.py           #   添加图片水印
 │   ├── image_batch_resize.py            #   批量缩放
 │   ├── image_blending_mode.py           #   图像混合模式
+│   ├── image_grid_concat.py             #   图像列表 + 宫格图像拼接
 │   ├── image_info.py                    #   图像信息
 │   ├── load_image.py                    #   加载图片
 │   └── remove_alpha_channel.py          #   移除透明通道
@@ -41,17 +42,10 @@ ComfyUI_Muye/
 │   ├── text_overlay_image.py            #   文字叠加图像
 │   └── text_split_delimiter.py          #   文本按分隔符分割
 │
-├── tool/                                # 工具节点
-│   ├── math_calculator.py               #   数学表达式计算
-│   ├── memory_cleanup.py                #   内存清理
-│   └── size_selector.py                 #   尺寸选择器
-│
-├── 示例图片/                            # 节点演示截图
-│
-└── 示例工作流/                          # ComfyUI 工作流 JSON
-    ├── 木叶节点展示.json
-    ├── 面部选择器（高级）示例.json
-    └── 反推工作流（lora批量打标）.json
+└── tool/                                # 工具节点
+    ├── math_calculator.py               #   数学表达式计算
+    ├── memory_cleanup.py                #   内存清理
+    └── size_selector.py                 #   尺寸选择器
 ```
 
 ---
@@ -230,16 +224,26 @@ ComfyUI/models/Caption_checkpoints/模型名/
 ![图片描述](./示例图片/移除透明通道.png)
 ![图片描述](./示例图片/文字叠加+图像混合.png)
 
-## 4,遮罩节点: mask_colorize 遮罩区域上色,mask_concatenate 遮罩拼接,mask_fill_holes 遮罩填充漏洞, mask_merge_list 遮罩合并(列表)
+## 4,图像节点: image_grid_concat 图像列表 + 宫格图像拼接,
+把多路图像收集成一个列表，再拼成最方正的宫格（最多 16 张 / 4x4），适合多参考图总览、批量结果对比。
+
+- **图像列表**：最多 16 路图像输入，未接的输入自动跳过，输出一个图像列表。
+- **宫格图像拼接**：输入兼容 4-D 批次张量 / 张量列表 / 单张，自动按最方正布局拼接：
+  - 1 张 → 1x1，2 张 → 2x1，3-4 张 → 2x2，5-9 张 → 3 列，10-16 张 → 4 列
+  - 自动剔除全黑占位帧（上游批次类节点对未接输入会补黑图占位，只拼实际有图的席位）
+- **匹配尺寸**：开 = 所有格统一成第一张图尺寸，图在格内等比适配居中（不裁剪不变形，留白填背景色）；关 = 各图保持原尺寸、在格内居中
+- 支持间隙和背景色（黑/白）设置，节点自带预览，输出真实 IMAGE 可继续往下接
+
+## 5,遮罩节点: mask_colorize 遮罩区域上色,mask_concatenate 遮罩拼接,mask_fill_holes 遮罩填充漏洞, mask_merge_list 遮罩合并(列表)
 ![图片描述](./示例图片/遮罩区域上色+遮罩填充.png)
 ![图片描述](./示例图片/遮罩拼接.png)
 ![图片描述](./示例图片/遮罩合并.png)
 
-## 5,文本节点: batch_text_replace 批量文本替换, text_edit_output 文本, split_list 文本列表拆分, text_overlay_image 文字叠加图像,text_split_delimiter 文本按分隔符分割
+## 6,文本节点: batch_text_replace 批量文本替换, text_edit_output 文本, split_list 文本列表拆分, text_overlay_image 文字叠加图像,text_split_delimiter 文本按分隔符分割
 ![图片描述](./示例图片/文字叠加.png)
 ![图片描述](./示例图片/基础节点.png)
 
-## 6.,额外节点: math_calculator 数学表达式计算,size_selector 尺寸选择器
+## 7.,额外节点: math_calculator 数学表达式计算,size_selector 尺寸选择器
 ### 数学表达式:
 支持整数,文本,浮点作为输入,然后进行运算,拥有5个输入接口
 ![图片描述](./示例图片/数学表达式.png)
